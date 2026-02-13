@@ -1,0 +1,60 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write
+
+jobs:
+  build-and-release:
+    runs-on: macos-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install xcodegen
+        run: |
+          if ! command -v xcodegen >/dev/null 2>&1; then
+            brew install xcodegen
+          fi
+
+      - name: Generate Xcode project
+        run: xcodegen generate
+
+      - name: Build (Release, no code signing)
+        run: |
+          set -o pipefail
+          xcodebuild \
+            -project GhostType.xcodeproj \
+            -scheme GhostType \
+            -configuration Release \
+            -derivedDataPath ./.build \
+            CODE_SIGNING_ALLOWED=NO \
+            build | tee ./release-build.log
+
+      - name: Package release asset
+        run: |
+          APP_PATH="./.build/Build/Products/Release/GhostType.app"
+          if [[ ! -d "$APP_PATH" ]]; then
+            echo "Expected app not found at $APP_PATH"
+            exit 1
+          fi
+          ASSET_NAME="GhostType-${GITHUB_REF_NAME}.app.zip"
+          ditto -c -k --sequesterRsrc --keepParent "$APP_PATH" "$ASSET_NAME"
+          echo "ASSET_NAME=$ASSET_NAME" >> "$GITHUB_ENV"
+
+      - name: Upload release build logs
+        uses: actions/upload-artifact@v4
+        with:
+          name: ghosttype-release-build-logs
+          path: ./release-build.log
+          if-no-files-found: error
+
+      - name: Publish GitHub release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: ${{ env.ASSET_NAME }}
+          generate_release_notes: true

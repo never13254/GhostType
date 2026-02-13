@@ -1,0 +1,67 @@
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches:
+      - main
+      - master
+
+jobs:
+  build-test-scan:
+    runs-on: macos-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install xcodegen
+        run: |
+          if ! command -v xcodegen >/dev/null 2>&1; then
+            brew install xcodegen
+          fi
+
+      - name: Repository safety scan
+        run: bash scripts/repo_safety_scan.sh
+
+      - name: Generate Xcode project
+        run: xcodegen generate
+
+      - name: Build (Debug, no code signing)
+        run: |
+          set -o pipefail
+          xcodebuild \
+            -project GhostType.xcodeproj \
+            -scheme GhostType \
+            -configuration Debug \
+            -derivedDataPath ./.build \
+            CODE_SIGNING_ALLOWED=NO \
+            build | tee ./build.log
+
+      - name: Test (Debug)
+        run: |
+          set -o pipefail
+          xcodebuild \
+            -project GhostType.xcodeproj \
+            -scheme GhostType \
+            -configuration Debug \
+            -derivedDataPath ./.build \
+            test | tee ./test.log
+
+      - name: Package Debug app artifact
+        run: |
+          APP_PATH="./.build/Build/Products/Debug/GhostType.app"
+          if [[ ! -d "$APP_PATH" ]]; then
+            echo "Expected app not found at $APP_PATH"
+            exit 1
+          fi
+          ditto -c -k --sequesterRsrc --keepParent "$APP_PATH" "./GhostType-Debug.app.zip"
+
+      - name: Upload workflow artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: ghosttype-ci-artifacts
+          path: |
+            ./GhostType-Debug.app.zip
+            ./build.log
+            ./test.log
+          if-no-files-found: error
