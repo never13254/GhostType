@@ -33,8 +33,13 @@ from typing import Any
 import numpy as np
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import JSONResponse, StreamingResponse
-from mlx_lm import load, stream_generate
-import mlx_whisper
+try:
+    from mlx_lm import load, stream_generate
+    import mlx_whisper
+except ImportError:  # pragma: no cover - MLX requires Apple Silicon
+    load = None  # type: ignore[assignment]
+    stream_generate = None  # type: ignore[assignment]
+    mlx_whisper = None  # type: ignore[assignment]
 from pydantic import BaseModel, Field
 
 from audio_io import WavFormatError, load_wav_pcm16_mono

@@ -98,7 +98,10 @@ class ServiceASRPathTests(unittest.TestCase):
 
             app = create_app(runtime)
             with TestClient(app) as client:
-                response = client.post("/asr/transcribe", json={"audio_path": str(invalid_wav)})
+                response = client.post("/asr/transcribe", json={
+                    "audio_path": str(invalid_wav),
+                    "audio_enhancement_enabled": False,
+                })
 
             self.assertEqual(response.status_code, 422)
             body = response.json()
