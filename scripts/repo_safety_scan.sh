@@ -49,7 +49,7 @@ if [[ ${#tracked_files[@]} -eq 0 ]]; then
   exit 0
 fi
 
-declare -a forbidden_file_hits
+forbidden_file_hits=()
 for file in "${tracked_files[@]}"; do
   case "$file" in
     *"/xcuserdata/"*|xcuserdata/*|*/DerivedData/*|DerivedData/*|*/.build/*|.build/*|*/build/*|build/*|*/dist/*|dist/*)
@@ -64,7 +64,7 @@ if [[ ${#forbidden_file_hits[@]} -gt 0 ]]; then
   add_failure "Forbidden tracked files detected:\n$(printf '  - %s\n' "${forbidden_file_hits[@]}")"
 fi
 
-declare -a oversized_files
+oversized_files=()
 for file in "${tracked_files[@]}"; do
   [[ -f "$file" ]] || continue
   size="$(file_size_bytes "$file")"
