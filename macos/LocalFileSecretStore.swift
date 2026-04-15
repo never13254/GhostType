@@ -1,12 +1,20 @@
 import CryptoKit
 import Foundation
+import Security
 
 /// Stores API secrets in a local AES-256-GCM encrypted JSON file.
 ///
 /// File location: `~/Library/Application Support/GhostType/secrets.enc`
-/// Key derivation: SHA-256(appSalt + IOPlatformUUID)
+/// Key management: A cryptographically random 256-bit key is generated on first
+///                 launch and stored in the macOS Keychain with
+///                 `kSecAttrAccessibleAfterFirstUnlockThisDeviceOnly` (device-bound,
+///                 no iCloud sync, no user prompt required at runtime).
 ///
-/// This replaces macOS Keychain to avoid repeated authorization popups.
+/// Files previously encrypted with the legacy SHA-256(salt+UUID) key are
+/// transparently re-encrypted under the new Keychain-backed key on first open.
+///
+/// Using a per-install random key avoids the weakness of the old scheme, where
+/// the key was fully deterministic from the publicly-readable IOPlatformUUID.
 final class LocalFileSecretStore: KeychainStoring {
     static let shared = LocalFileSecretStore()
 
@@ -15,7 +23,9 @@ final class LocalFileSecretStore: KeychainStoring {
     private let symmetricKey: SymmetricKey
     private let fileWriteOptions: Data.WritingOptions
 
-    private static let appSalt = "com.codeandchill.ghosttype.local-secrets.v1"
+    /// Keychain coordinates for the random file-encryption key.
+    private static let keyService = "com.codeandchill.ghosttype.file-encryption-key"
+    private static let keyAccount = "v2"
 
     private init() {
         let appSupport = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first!
@@ -26,8 +36,10 @@ final class LocalFileSecretStore: KeychainStoring {
             ofItemAtPath: directory.path
         )
         self.fileURL = directory.appendingPathComponent("secrets.enc")
-        self.symmetricKey = Self.deriveKey()
         self.fileWriteOptions = Self.defaultWriteOptions
+        self.symmetricKey = Self.loadOrCreateKeychainKey()
+        // self is fully initialised here; safe to call instance methods.
+        migrateFromLegacyEncryptionIfNeeded()
     }
 
     /// Test-only initializer with explicit path and key.
@@ -164,9 +176,91 @@ final class LocalFileSecretStore: KeychainStoring {
 #endif
     }
 
-    private static func deriveKey() -> SymmetricKey {
+    // MARK: - Key Management
+
+    /// Loads the random 256-bit encryption key from the Keychain, creating and
+    /// persisting a new one if none is found.
+    ///
+    /// Storage attributes:
+    /// - `kSecAttrAccessibleAfterFirstUnlockThisDeviceOnly`: available after
+    ///   the device has been unlocked once since boot; not backed up to iCloud;
+    ///   device-bound; no interactive user prompt required.
+    private static func loadOrCreateKeychainKey() -> SymmetricKey {
+        let query: [String: Any] = [
+            kSecClass as String: kSecClassGenericPassword,
+            kSecAttrService as String: keyService,
+            kSecAttrAccount as String: keyAccount,
+            kSecReturnData as String: true,
+            kSecMatchLimit as String: kSecMatchLimitOne
+        ]
+
+        var item: AnyObject?
+        let status = SecItemCopyMatching(query as CFDictionary, &item)
+
+        if status == errSecSuccess, let data = item as? Data, data.count == 32 {
+            return SymmetricKey(data: data)
+        }
+
+        // Generate a new cryptographically random key.
+        let newKey = SymmetricKey(size: .bits256)
+        let keyData = newKey.withUnsafeBytes { Data($0) }
+
+        // Remove any malformed or outdated entry before inserting.
+        if status != errSecItemNotFound {
+            SecItemDelete([
+                kSecClass as String: kSecClassGenericPassword,
+                kSecAttrService as String: keyService,
+                kSecAttrAccount as String: keyAccount
+            ] as CFDictionary)
+        }
+
+        let addAttributes: [String: Any] = [
+            kSecClass as String: kSecClassGenericPassword,
+            kSecAttrService as String: keyService,
+            kSecAttrAccount as String: keyAccount,
+            kSecValueData as String: keyData,
+            kSecAttrAccessible as String: kSecAttrAccessibleAfterFirstUnlockThisDeviceOnly
+        ]
+
+        let addStatus = SecItemAdd(addAttributes as CFDictionary, nil)
+        guard addStatus == errSecSuccess else {
+            // Keychain unavailable — fall back to legacy derivation so the app
+            // remains functional. This should not occur on a standard macOS install.
+            return deriveLegacyKey()
+        }
+
+        return newKey
+    }
+
+    // MARK: - Migration from Legacy Key Derivation
+
+    /// Re-encrypts the secrets file under the Keychain-backed key when it was
+    /// previously written with the legacy SHA-256(salt+UUID) derived key.
+    ///
+    /// Called once during initialisation before `self` is exposed to other threads,
+    /// so `loadStore()` / `saveStore()` are invoked directly without `queue.sync`.
+    private func migrateFromLegacyEncryptionIfNeeded() {
+        guard FileManager.default.fileExists(atPath: fileURL.path) else { return }
+        // Fast path: current key already opens the file — nothing to migrate.
+        if (try? loadStore()) != nil { return }
+
+        // Attempt to open the file with the old derived key.
+        let legacyStore = LocalFileSecretStore(fileURL: fileURL, symmetricKey: Self.deriveLegacyKey())
+        guard let existingSecrets = try? legacyStore.loadStore() else { return }
+
+        // Re-encrypt under the new Keychain-backed key (atomic write, best-effort).
+        try? saveStore(existingSecrets)
+    }
+
+    // MARK: - Legacy Key (Migration Only)
+
+    private static let legacyAppSalt = "com.codeandchill.ghosttype.local-secrets.v1"
+
+    /// SHA-256(appSalt + IOPlatformUUID). Retained solely to decrypt files written
+    /// by earlier releases. **Do not use for new encryption.**
+    private static func deriveLegacyKey() -> SymmetricKey {
         let machineID = platformUUID() ?? "fallback-machine-id"
-        let material = "\(appSalt).\(machineID)"
+        let material = "\(legacyAppSalt).\(machineID)"
         let hash = SHA256.hash(data: Data(material.utf8))
         return SymmetricKey(data: hash)
     }
